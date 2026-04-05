@@ -28,7 +28,9 @@ defmodule HermesBeam.MixProject do
       # --- Core Ash Stack ---
       {:ash, "~> 3.0"},
       {:ash_postgres, "~> 2.0"},
-      {:ash_ai, "~> 0.5"},
+      # ash_ai is under active development; >= 0.5.0 allows patch and minor
+      # upgrades while still bounding the major API surface.
+      {:ash_ai, ">= 0.5.0 and < 1.0.0"},
       {:reactor, "~> 0.9"},
 
       # --- Database ---

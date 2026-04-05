@@ -11,8 +11,10 @@ defmodule HermesBeam.Workflows.AgentLoop do
   2. Reads the current `Scratchpad` for bounded working context.
   3. Builds an enriched prompt (memories + scratchpad + user input).
   4. Routes to the correct hardware tier via `IntelligentRouter`.
+     If the target model is in `:degraded` state, the step returns a
+     clearly labelled degraded response rather than crashing the turn.
   5. Stores the interaction as an episodic reflection.
-  6. Calls the LLM to curate and persist an updated `Scratchpad`.
+  6. Calls `tier_3_docs` to curate and persist an updated `Scratchpad`.
      Falls back to `:curation_skipped` on any failure so the turn always
      completes rather than rolling back.
   """
@@ -53,8 +55,8 @@ defmodule HermesBeam.Workflows.AgentLoop do
 
     run fn %{agent_id: agent_id}, _ctx ->
       case Ash.get(HermesBeam.Memory.Scratchpad, [agent_id: agent_id]) do
-        {:ok, pad}    -> {:ok, pad}
-        {:error, _}   -> {:ok, nil}
+        {:ok, pad}  -> {:ok, pad}
+        {:error, _} -> {:ok, nil}
       end
     end
   end
@@ -105,10 +107,20 @@ defmodule HermesBeam.Workflows.AgentLoop do
     argument :task_type, input(:task_type)
 
     run fn %{prompt: prompt, task_type: task_type}, _ctx ->
-      HermesBeam.LLM.ModelWorker.generate(
-        HermesBeam.Workflows.IntelligentRouter.tier_for(task_type),
-        prompt
-      )
+      tier = HermesBeam.Workflows.IntelligentRouter.tier_for(task_type)
+
+      case HermesBeam.LLM.ModelWorker.generate(tier, prompt) do
+        {:ok, text} ->
+          {:ok, text}
+
+        {:error, :degraded} ->
+          Logger.warning("[AgentLoop] Tier #{tier} is degraded — returning fallback response")
+          {:ok, "[Model unavailable: #{tier} failed to load. Please check hardware and model config.]"}  
+
+        {:error, reason} ->
+          Logger.error("[AgentLoop] Inference failed on #{tier}: #{inspect(reason)}")
+          {:error, reason}
+      end
     end
   end
 
@@ -137,68 +149,74 @@ defmodule HermesBeam.Workflows.AgentLoop do
   # Step 5: Curate scratchpad — LLM condenses working memory
   # ---------------------------------------------------------------------------
   step :curate_scratchpad do
-    argument :agent_id,  input(:agent_id)
+    argument :agent_id,   input(:agent_id)
     argument :scratchpad, result(:fetch_scratchpad)
-    argument :prompt,    input(:user_prompt)
-    argument :response,  result(:execute_inference)
+    argument :prompt,     input(:user_prompt)
+    argument :response,   result(:execute_inference)
 
     run fn %{agent_id: agent_id, scratchpad: pad, prompt: prompt, response: response}, _ctx ->
-      current_memory = if pad, do: pad.memory_text, else: "System initialized. No memories yet."
-      current_user   = if pad, do: pad.user_text,   else: "No user preferences recorded."
-
-      curation_prompt = """
-      You maintain two bounded memory fields for an AI agent.
-      Update both fields to reflect the latest interaction.
-      Keep only durable, high-value information.
-      Hard limits: memory_text \u2264 2200 chars, user_text \u2264 1375 chars.
-
-      Return ONLY valid JSON — no markdown, no explanation:
-      {"memory_text":"...","user_text":"..."}
-
-      Current memory_text:
-      #{current_memory}
-
-      Current user_text:
-      #{current_user}
-
-      Latest interaction:
-      User: #{prompt}
-      Agent: #{response}
-      """
-
-      with {:ok, raw}  <- HermesBeam.LLM.ModelWorker.generate(:tier_3_docs, curation_prompt),
-           cleaned     <- raw
-                          |> String.replace(~r/```json\s*/i, "")
-                          |> String.replace("```", "")
-                          |> String.trim(),
-           {:ok, attrs}        <- Jason.decode(cleaned),
-           memory_text when is_binary(memory_text) <- Map.get(attrs, "memory_text"),
-           user_text   when is_binary(user_text)   <- Map.get(attrs, "user_text") do
-        if pad do
-          pad
-          |> Ash.ActionInput.for_update(:curate_memory, %{memory_text: memory_text, user_text: user_text})
-          |> Ash.update()
-        else
-          HermesBeam.Memory.Scratchpad
-          |> Ash.ActionInput.for_create(:initialize, %{
-            agent_id:    agent_id,
-            memory_text: memory_text,
-            user_text:   user_text
-          })
-          |> Ash.create()
-        end
+      # Skip curation if this was itself a degraded fallback response —
+      # no value in condensing an error message into working memory.
+      if String.starts_with?(response, "[Model unavailable") do
+        {:ok, :curation_skipped}
       else
-        {:error, reason} ->
-          Logger.warning("[AgentLoop] Scratchpad curation failed: #{inspect(reason)}")
-          {:ok, :curation_skipped}
+        current_memory = if pad, do: pad.memory_text, else: "System initialized. No memories yet."
+        current_user   = if pad, do: pad.user_text,   else: "No user preferences recorded."
 
-        nil ->
-          Logger.warning("[AgentLoop] Scratchpad curation returned incomplete JSON")
-          {:ok, :curation_skipped}
+        curation_prompt = """
+        You maintain two bounded memory fields for an AI agent.
+        Update both fields to reflect the latest interaction.
+        Keep only durable, high-value information.
+        Hard limits: memory_text ≤ 2200 chars, user_text ≤ 1375 chars.
 
-        other ->
-          Logger.warning("[AgentLoop] Scratchpad curation unexpected result: #{inspect(other)}")
-          {:ok, :curation_skipped}
+        Return ONLY valid JSON — no markdown, no explanation:
+        {"memory_text":"...","user_text":"..."}
+
+        Current memory_text:
+        #{current_memory}
+
+        Current user_text:
+        #{current_user}
+
+        Latest interaction:
+        User: #{prompt}
+        Agent: #{response}
+        """
+
+        with {:ok, raw} <- HermesBeam.LLM.ModelWorker.generate(:tier_3_docs, curation_prompt),
+             cleaned    <- raw
+                           |> String.replace(~r/```json\s*/i, "")
+                           |> String.replace("```", "")
+                           |> String.trim(),
+             {:ok, attrs}       <- Jason.decode(cleaned),
+             memory_text when is_binary(memory_text) <- Map.get(attrs, "memory_text"),
+             user_text   when is_binary(user_text)   <- Map.get(attrs, "user_text") do
+          if pad do
+            pad
+            |> Ash.ActionInput.for_update(:curate_memory, %{memory_text: memory_text, user_text: user_text})
+            |> Ash.update()
+          else
+            HermesBeam.Memory.Scratchpad
+            |> Ash.ActionInput.for_create(:initialize, %{
+              agent_id:    agent_id,
+              memory_text: memory_text,
+              user_text:   user_text
+            })
+            |> Ash.create()
+          end
+        else
+          {:error, reason} ->
+            Logger.warning("[AgentLoop] Scratchpad curation failed: #{inspect(reason)}")
+            {:ok, :curation_skipped}
+
+          nil ->
+            Logger.warning("[AgentLoop] Scratchpad curation returned incomplete JSON")
+            {:ok, :curation_skipped}
+
+          other ->
+            Logger.warning("[AgentLoop] Scratchpad curation unexpected result: #{inspect(other)}")
+            {:ok, :curation_skipped}
+        end
       end
     end
   end

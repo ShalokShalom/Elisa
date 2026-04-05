@@ -17,13 +17,13 @@ loaded_tiers =
     "gaming_gpu" ->
       [
         {:tier_1_reasoning, "meta-llama/Meta-Llama-3-70B-Instruct"},
-        {:tier_2_general, "meta-llama/Meta-Llama-3-8B-Instruct"}
+        {:tier_2_general,   "meta-llama/Meta-Llama-3-8B-Instruct"}
       ]
 
     "mac_mini_pro" ->
       [
         {:tier_2_general, "meta-llama/Meta-Llama-3-8B-Instruct"},
-        {:tier_3_docs, "microsoft/Phi-3-mini-4k-instruct"}
+        {:tier_3_docs,    "microsoft/Phi-3-mini-4k-instruct"}
       ]
 
     _base ->
@@ -37,6 +37,34 @@ config :hermes_beam, :topology,
   role: node_role,
   hub_ip: hub_ip,
   active_tiers: loaded_tiers
+
+# ---------------------------------------------------------------------------
+# Synthetic data agent identity
+# Required by IdleScheduler. Use a fixed UUIDv4 so synthetic memories are
+# attributed to a stable agent identity across restarts and renames.
+# Generate one with: `mix run -e 'IO.puts(Ecto.UUID.generate())'`
+# ---------------------------------------------------------------------------
+config :hermes_beam,
+  synthetic_agent_id:
+    System.get_env("SYNTHETIC_AGENT_ID") ||
+      raise """
+      SYNTHETIC_AGENT_ID environment variable is not set.
+      Generate a stable UUID for the synthetic memory agent and export it:
+
+          export SYNTHETIC_AGENT_ID=$(mix run -e 'IO.puts(Ecto.UUID.generate())')
+
+      Or set it permanently in your .env / release config.
+      """
+
+# ---------------------------------------------------------------------------
+# Embedding model (used by HermesBeam.Memory.Episodic)
+# Default: local BGE-small (384-dim, fits any node).
+# For higher recall quality on Mac Mini Pro / Gaming PC:
+#   export HERMES_EMBEDDING_MODEL="nomic-ai/nomic-embed-text-v1.5"
+#   and update the :dimensions constraint in episodic.ex to 768.
+# ---------------------------------------------------------------------------
+# NOTE: HERMES_EMBEDDING_MODEL is read directly via System.get_env/2 inside
+# episodic.ex at compile time — no config block needed here.
 
 # ---------------------------------------------------------------------------
 # Database: Hub connects to localhost; Workers connect via Tailscale to Hub.
