@@ -5,7 +5,7 @@ defmodule HermesBeam.LLM.ModelWorker do
 
   Once started, any node in the Erlang cluster can call:
 
-      Nx.Serving.batched_run(:tier_1_reasoning, prompt)
+      HermesBeam.LLM.ModelWorker.generate(:tier_1_reasoning, prompt)
 
   If the calling node does not host that serving, the BEAM VM will
   automatically forward the request to the node that does — entirely
@@ -13,12 +13,17 @@ defmodule HermesBeam.LLM.ModelWorker do
 
   ## Failure handling
 
-  Model loading (downloading weights, compiling EXLA kernels) can take several
-  minutes and can fail for reasons outside the app's control (wrong CUDA
+  Model loading can fail for reasons outside the app's control (wrong CUDA
   version, missing HuggingFace token, OOM). Rather than crashing and triggering
-  infinite supervisor restarts, the worker moves into a `:degraded` state,
-  logs the error, and responds to `generate/2` calls with `{:error, :degraded}`
-  so callers can fall back gracefully.
+  infinite supervisor restarts, the worker moves into a `:degraded` state and
+  responds to `generate/2` calls with `{:error, :degraded}` so callers can
+  fall back gracefully.
+
+  ## Degraded detection
+
+  `generate/2` checks the worker's status via `GenServer.call/2` before
+  attempting `Nx.Serving.batched_run/2`. This avoids masking `:noproc` and
+  other infrastructure errors as `:degraded` when the process itself is gone.
   """
   use GenServer
   require Logger
@@ -29,14 +34,58 @@ defmodule HermesBeam.LLM.ModelWorker do
     tier_3_docs:      1024
   }
 
+  # ---------------------------------------------------------------------------
+  # Public API
+  # ---------------------------------------------------------------------------
+
   def start_link({tier_name, hf_repo}) do
     GenServer.start_link(__MODULE__, {tier_name, hf_repo}, name: tier_name)
   end
 
+  @doc """
+  Generate text from the given prompt using the serving registered under
+  `tier_name`. Routes automatically to the correct cluster node.
+
+  Returns:
+  - `{:ok, text}` on success
+  - `{:error, :degraded}` if the model failed to load on the target node
+  - `{:error, reason}` for unexpected infrastructure failures
+  """
+  @spec generate(atom(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def generate(tier_name, prompt) do
+    # Ask the worker for its status before hitting the serving.
+    # This gives a clean :degraded signal rather than an opaque :noproc exit.
+    case GenServer.call(tier_name, :status) do
+      :ready ->
+        try do
+          %{results: [%{text: text} | _]} = Nx.Serving.batched_run(tier_name, prompt)
+          {:ok, text}
+        catch
+          :exit, reason -> {:error, reason}
+        end
+
+      :degraded ->
+        {:error, :degraded}
+
+      :loading ->
+        # Still booting — treat as temporary unavailability
+        {:error, :loading}
+    end
+  end
+
+  # ---------------------------------------------------------------------------
+  # GenServer callbacks
+  # ---------------------------------------------------------------------------
+
   @impl true
   def init({tier_name, hf_repo}) do
     send(self(), {:load_model, tier_name, hf_repo})
-    {:ok, %{tier: tier_name, repo: hf_repo, serving_pid: nil, status: :loading}}
+    {:ok, %{tier: tier_name, repo: hf_repo, status: :loading}}
+  end
+
+  @impl true
+  def handle_call(:status, _from, state) do
+    {:reply, state.status, state}
   end
 
   @impl true
@@ -63,15 +112,18 @@ defmodule HermesBeam.LLM.ModelWorker do
             defn_options: [compiler: EXLA]
           )
 
-        {:ok, pid} =
+        # Start the serving as a globally registered name so any cluster node
+        # can call it. The serving runs in its own process tree — it is NOT
+        # linked to this GenServer to avoid cascading failures.
+        {:ok, _pid} =
           Nx.Serving.start_link(
             serving: serving,
-            name: tier_name,
+            name: {:global, tier_name},
             batch_timeout: 100,
             partitions: true
           )
 
-        {:ok, pid}
+        :ok
       rescue
         e ->
           Logger.error("[ModelWorker] Failed to load #{hf_repo}: #{Exception.message(e)}")
@@ -83,32 +135,13 @@ defmodule HermesBeam.LLM.ModelWorker do
       end
 
     case result do
-      {:ok, pid} ->
-        Logger.info("[ModelWorker] #{tier_name} ready (pid: #{inspect(pid)})")
-        {:noreply, %{state | serving_pid: pid, status: :ready}}
+      :ok ->
+        Logger.info("[ModelWorker] #{tier_name} ready")
+        {:noreply, %{state | status: :ready}}
 
       {:error, reason} ->
         Logger.warning("[ModelWorker] #{tier_name} in degraded mode: #{inspect(reason)}")
         {:noreply, %{state | status: :degraded}}
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Public API
-  # ---------------------------------------------------------------------------
-
-  @doc """
-  Generate text from the given prompt using the serving registered under
-  `tier_name`. Routes automatically to the correct cluster node.
-  Returns `{:error, :degraded}` if the model failed to load.
-  """
-  @spec generate(atom(), String.t()) :: {:ok, String.t()} | {:error, term()}
-  def generate(tier_name, prompt) do
-    try do
-      %{results: [%{text: text} | _]} = Nx.Serving.batched_run(tier_name, prompt)
-      {:ok, text}
-    catch
-      :exit, reason -> {:error, reason}
     end
   end
 end

@@ -23,10 +23,14 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
   @table :workflow_log_index
 
   def attach do
-    unless :ets.whereis(@table) != :undefined do
+    # Create the ETS table only if it does not already exist.
+    # Guards against double-attachment on hot code reload.
+    if :ets.whereis(@table) == :undefined do
       :ets.new(@table, [:named_table, :public, :set])
     end
 
+    # Raises ArgumentError if the handler ID is already registered.
+    # Callers (Application.start/2) rescue this for idempotency.
     :telemetry.attach_many(
       "hermes-beam-workflow-handler",
       [
@@ -44,7 +48,7 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
     workflow_name = inspect(metadata[:reactor])
 
     case HermesBeam.WorkflowLog
-         |> Ash.ActionInput.for_create(:create, %{
+         |> Ash.Changeset.for_create(:create, %{
            workflow_name: workflow_name,
            input_snapshot: metadata[:inputs] || %{}
          })
@@ -65,7 +69,7 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
           attrs  = if measurements[:error], do: %{error_reason: inspect(measurements[:error])}, else: %{}
 
           log
-          |> Ash.ActionInput.for_update(action, attrs)
+          |> Ash.Changeset.for_update(action, attrs)
           |> Ash.update()
         end
 
@@ -101,7 +105,7 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
           updated_steps = Map.put(log.steps || %{}, to_string(step_name), attrs)
 
           log
-          |> Ash.ActionInput.for_update(:update_step, %{steps: updated_steps})
+          |> Ash.Changeset.for_update(:update_step, %{steps: updated_steps})
           |> Ash.update()
         end
 

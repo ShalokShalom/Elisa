@@ -10,12 +10,17 @@ defmodule HermesBeam.Memory.Episodic do
 
   ## Local-first embedding
 
-  The embedding model is resolved from the `HERMES_EMBEDDING_MODEL` environment
-  variable (default: `"local/bge-small-en-v1.5"`). This keeps the project
-  aligned with its sovereign, air-gapped design — no call is ever made to
-  `api.openai.com`. For best quality on Mac Mini Pro / Gaming PC hardware,
-  set this to `"nomic-ai/nomic-embed-text-v1.5"` (768-dim, adjust the
-  `dimensions` constraint and IVFFlat `lists` accordingly).
+  Default model: `"local/bge-small-en-v1.5"` — 384 dimensions, runs on any node.
+  For higher recall quality set `HERMES_EMBEDDING_MODEL` to one of:
+
+    | Model                              | Dims | Hardware         |
+    |------------------------------------|------|------------------|
+    | local/bge-small-en-v1.5 (default)  |  384 | any              |
+    | nomic-ai/nomic-embed-text-v1.5     |  768 | Mac Mini Pro +   |
+    | text-embedding-3-large (OpenAI)    | 3072 | cloud only       |
+
+  If you change model, also update `dimensions:` below and run a migration to
+  rebuild the `content_vector` column and IVFFlat index.
 
   ## IVFFlat performance note
 
@@ -45,10 +50,10 @@ defmodule HermesBeam.Memory.Episodic do
     embeddings do
       embed :content_vector do
         source :content
-        # Resolved at runtime from env to keep embedding provider swappable.
-        # Default: local BGE-small (384-dim). Change dimensions below if you
-        # switch to a larger model such as nomic-embed (768-dim).
-        model System.get_env("HERMES_EMBEDDING_MODEL", "local/bge-small-en-v1.5")
+        # Model is resolved from the environment at application boot.
+        # The default (bge-small, 384-dim) matches the `dimensions:` constraint
+        # below. If you change model, change dimensions too.
+        model Application.get_env(:hermes_beam, :embedding_model, "local/bge-small-en-v1.5")
       end
     end
   end
@@ -86,8 +91,11 @@ defmodule HermesBeam.Memory.Episodic do
       default: :observation,
       allow_nil?: false
 
+    # dimensions: 384 = bge-small-en-v1.5 (default)
+    # Change to 768 for nomic-embed, 3072 for text-embedding-3-large.
+    # Any change requires a migration to rebuild this column and its index.
     attribute :content_vector, Ash.Type.Vector,
-      constraints: [dimensions: 3072],
+      constraints: [dimensions: 384],
       allow_nil?: true
 
     create_timestamp :inserted_at

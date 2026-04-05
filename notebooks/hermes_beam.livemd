@@ -142,7 +142,10 @@ recent_runs
 ```elixir
 alias HermesBeam.Skill
 
-skills = Ash.read!(Skill, query: Ash.Query.sort(Skill, execution_count: :desc))
+skills =
+  Skill
+  |> Ash.Query.sort(execution_count: :desc)
+  |> Ash.read!()
 
 IO.puts("\n=== Skills (#{length(skills)} total) ===")
 for skill <- skills do
@@ -165,10 +168,11 @@ skills
 ```elixir
 # Manually trigger a SyntheticDataReactor run
 concept = "Erlang distribution and fault tolerance"
+agent_id = Application.get_env(:hermes_beam, :synthetic_agent_id)
 
 Reactor.run(
   HermesBeam.Workflows.SyntheticDataReactor,
-  %{concept_to_explore: concept}
+  %{concept_to_explore: concept, agent_id: agent_id}
 )
 |> IO.inspect(label: "SyntheticDataReactor")
 ```

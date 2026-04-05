@@ -10,6 +10,12 @@ defmodule HermesBeam.Skill do
   3. On subsequent turns, the skill is available as a callable Ash Action.
   4. If a skill fails, Reactor's `undo/3` triggers `:refine_skill`, prompting
      the LLM to rewrite the code given the error context.
+
+  ## Execution tracking
+
+  Call `record_execution/2` with `succeeded?: true | false` after each use.
+  The `success_rate` is a rolling exponential moving average (alpha=0.1) so
+  recent failures have more weight than ancient ones.
   """
   use Ash.Resource,
     domain: HermesBeam.Domain,
@@ -36,26 +42,33 @@ defmodule HermesBeam.Skill do
     end
 
     update :refine_skill do
-      @doc """
-      Called by Reactor's undo compensation when a skill execution fails.
-      Recompiles the skill with corrected source code from the LLM.
-      """
       accept [:elixir_code]
       change HermesBeam.Changes.CompileSkillModule
     end
 
     update :record_execution do
-      accept []
+      @doc """
+      Record one execution result. Updates the execution count and
+      computes a rolling EMA of success rate (alpha = 0.1).
+
+      Call as:
+          skill |> Ash.Changeset.for_update(:record_execution, %{succeeded?: true}) |> Ash.update()
+      """
+      accept [:succeeded?]
 
       change fn changeset, _ctx ->
-        current_count   = Ash.Changeset.get_attribute(changeset, :execution_count)
-        current_success = Ash.Changeset.get_attribute(changeset, :success_rate)
+        succeeded     = Ash.Changeset.get_argument(changeset, :succeeded?) || true
+        current_count = Ash.Changeset.get_attribute(changeset, :execution_count) || 0
+        current_rate  = Ash.Changeset.get_attribute(changeset, :success_rate) || 1.0
 
-        Ash.Changeset.change_attributes(changeset, %{
-          execution_count: current_count + 1,
-          last_executed_at: DateTime.utc_now()
-        })
-        |> Ash.Changeset.change_attribute(:success_rate, current_success)
+        # Exponential moving average: new_rate = 0.9 * old + 0.1 * outcome
+        outcome   = if succeeded, do: 1.0, else: 0.0
+        new_rate  = 0.9 * current_rate + 0.1 * outcome
+
+        changeset
+        |> Ash.Changeset.change_attribute(:execution_count, current_count + 1)
+        |> Ash.Changeset.change_attribute(:success_rate, new_rate)
+        |> Ash.Changeset.change_attribute(:last_executed_at, DateTime.utc_now())
       end
     end
   end
@@ -71,6 +84,10 @@ defmodule HermesBeam.Skill do
     create_timestamp :inserted_at
     update_timestamp :updated_at
     attribute :last_executed_at, :utc_datetime
+  end
+
+  arguments do
+    argument :succeeded?, :boolean, default: true
   end
 
   identities do

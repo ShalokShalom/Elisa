@@ -54,9 +54,18 @@ defmodule HermesBeam.Workflows.AgentLoop do
     argument :agent_id, input(:agent_id)
 
     run fn %{agent_id: agent_id}, _ctx ->
-      case Ash.get(HermesBeam.Memory.Scratchpad, [agent_id: agent_id]) do
-        {:ok, pad}  -> {:ok, pad}
-        {:error, _} -> {:ok, nil}
+      # Use a read action filtered by agent_id rather than Ash.get/2 which
+      # requires the primary key (UUID id), not agent_id.
+      result =
+        HermesBeam.Memory.Scratchpad
+        |> Ash.Query.filter(agent_id == ^agent_id)
+        |> Ash.read_one()
+
+      case result do
+        {:ok, pad} -> {:ok, pad}            # nil if no scratchpad exists yet
+        {:error, reason} ->
+          Logger.warning("[AgentLoop] Scratchpad read failed: #{inspect(reason)}")
+          {:ok, nil}
       end
     end
   end
@@ -115,7 +124,11 @@ defmodule HermesBeam.Workflows.AgentLoop do
 
         {:error, :degraded} ->
           Logger.warning("[AgentLoop] Tier #{tier} is degraded — returning fallback response")
-          {:ok, "[Model unavailable: #{tier} failed to load. Please check hardware and model config.]"}  
+          {:ok, "[Model unavailable: #{tier} failed to load. Please check hardware and model config.]"}
+
+        {:error, :loading} ->
+          Logger.warning("[AgentLoop] Tier #{tier} is still loading — retrying is recommended")
+          {:ok, "[Model loading: #{tier} is warming up. Please retry in a moment.]"}
 
         {:error, reason} ->
           Logger.error("[AgentLoop] Inference failed on #{tier}: #{inspect(reason)}")
@@ -136,7 +149,7 @@ defmodule HermesBeam.Workflows.AgentLoop do
       content = "User: #{prompt}\nAgent: #{response}"
 
       HermesBeam.Memory.Episodic
-      |> Ash.ActionInput.for_create(:store, %{
+      |> Ash.Changeset.for_create(:store, %{
         agent_id: agent_id,
         content:  content,
         type:     :reflection
@@ -155,9 +168,8 @@ defmodule HermesBeam.Workflows.AgentLoop do
     argument :response,   result(:execute_inference)
 
     run fn %{agent_id: agent_id, scratchpad: pad, prompt: prompt, response: response}, _ctx ->
-      # Skip curation if this was itself a degraded fallback response —
-      # no value in condensing an error message into working memory.
-      if String.starts_with?(response, "[Model unavailable") do
+      # Skip curation if this was a degraded/loading fallback response.
+      if String.starts_with?(response, "[Model") do
         {:ok, :curation_skipped}
       else
         current_memory = if pad, do: pad.memory_text, else: "System initialized. No memories yet."
@@ -193,11 +205,11 @@ defmodule HermesBeam.Workflows.AgentLoop do
              user_text   when is_binary(user_text)   <- Map.get(attrs, "user_text") do
           if pad do
             pad
-            |> Ash.ActionInput.for_update(:curate_memory, %{memory_text: memory_text, user_text: user_text})
+            |> Ash.Changeset.for_update(:curate_memory, %{memory_text: memory_text, user_text: user_text})
             |> Ash.update()
           else
             HermesBeam.Memory.Scratchpad
-            |> Ash.ActionInput.for_create(:initialize, %{
+            |> Ash.Changeset.for_create(:initialize, %{
               agent_id:    agent_id,
               memory_text: memory_text,
               user_text:   user_text

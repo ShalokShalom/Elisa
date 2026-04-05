@@ -40,8 +40,10 @@ defmodule HermesBeam.Application do
   defp base_children do
     [
       HermesBeam.Repo,
-      {Phoenix.PubSub, name: HermesBeam.PubSub},
-      {Ash, domain: HermesBeam.Domain}
+      {Phoenix.PubSub, name: HermesBeam.PubSub}
+      # NOTE: Ash.Domain does not define a supervised process.
+      # Resources are registered via `use Ash.Resource, domain: ...` at
+      # compile time. No runtime child spec is needed or valid here.
     ]
   end
 
@@ -54,7 +56,6 @@ defmodule HermesBeam.Application do
     [HermesBeam.LLM.TierSupervisor]
   end
 
-  # Hub-only: IdleScheduler for synthetic data generation.
   defp hub_children("hub") do
     Logger.info("[HermesBeam] Hub mode: starting IdleScheduler")
     [HermesBeam.IdleScheduler]
@@ -62,8 +63,6 @@ defmodule HermesBeam.Application do
 
   defp hub_children(_), do: []
 
-  # Hub-only: Phoenix LiveView dashboard.
-  # Guards against modules not yet compiled (e.g. during early dev).
   defp dashboard_children("hub") do
     Logger.info("[HermesBeam] Hub mode: starting Phoenix dashboard")
 
@@ -78,8 +77,9 @@ defmodule HermesBeam.Application do
   # ---------------------------------------------------------------------------
 
   # Attaches the WorkflowHandler telemetry on every node so Worker-originated
-  # Reactor events are also captured. The attachment is idempotent — calling
-  # it twice raises ArgumentError, which we swallow.
+  # Reactor events are also captured.
+  # WorkflowHandler.attach/0 raises ArgumentError if the handler ID is already
+  # registered (e.g. on hot code reload). We rescue it here for idempotency.
   defp attach_telemetry_once do
     HermesBeam.Telemetry.WorkflowHandler.attach()
   rescue

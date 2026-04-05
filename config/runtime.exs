@@ -39,10 +39,20 @@ config :hermes_beam, :topology,
   active_tiers: loaded_tiers
 
 # ---------------------------------------------------------------------------
+# Embedding model
+# Dimensions must match the `dimensions:` constraint in episodic.ex.
+#   "local/bge-small-en-v1.5"          -> 384  (default, any hardware)
+#   "nomic-ai/nomic-embed-text-v1.5"   -> 768  (Mac Mini Pro+)
+#   (OpenAI text-embedding-3-large)    -> 3072  (cloud only)
+# ---------------------------------------------------------------------------
+embedding_model = System.get_env("HERMES_EMBEDDING_MODEL", "local/bge-small-en-v1.5")
+config :hermes_beam, embedding_model: embedding_model
+
+# ---------------------------------------------------------------------------
 # Synthetic data agent identity
 # Required by IdleScheduler. Use a fixed UUIDv4 so synthetic memories are
 # attributed to a stable agent identity across restarts and renames.
-# Generate one with: `mix run -e 'IO.puts(Ecto.UUID.generate())'`
+# Generate one with: mix run -e 'IO.puts(Ecto.UUID.generate())'
 # ---------------------------------------------------------------------------
 config :hermes_beam,
   synthetic_agent_id:
@@ -57,17 +67,7 @@ config :hermes_beam,
       """
 
 # ---------------------------------------------------------------------------
-# Embedding model (used by HermesBeam.Memory.Episodic)
-# Default: local BGE-small (384-dim, fits any node).
-# For higher recall quality on Mac Mini Pro / Gaming PC:
-#   export HERMES_EMBEDDING_MODEL="nomic-ai/nomic-embed-text-v1.5"
-#   and update the :dimensions constraint in episodic.ex to 768.
-# ---------------------------------------------------------------------------
-# NOTE: HERMES_EMBEDDING_MODEL is read directly via System.get_env/2 inside
-# episodic.ex at compile time — no config block needed here.
-
-# ---------------------------------------------------------------------------
-# Database: Hub connects to localhost; Workers connect via Tailscale to Hub.
+# Database
 # ---------------------------------------------------------------------------
 db_host =
   if node_type == "hub", do: "localhost", else: hub_ip
@@ -81,7 +81,7 @@ config :hermes_beam, HermesBeam.Repo,
   ssl: node_type != "hub"
 
 # ---------------------------------------------------------------------------
-# libcluster_postgres — points at the Hub's Postgres regardless of node type.
+# libcluster_postgres
 # ---------------------------------------------------------------------------
 config :hermes_beam, :libcluster,
   topologies: [

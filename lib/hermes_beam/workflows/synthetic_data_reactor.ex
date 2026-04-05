@@ -63,7 +63,6 @@ defmodule HermesBeam.Workflows.SyntheticDataReactor do
     argument :raw, result(:generate_scenarios)
 
     run fn %{raw: raw}, _ctx ->
-      # Strip markdown code fences if the model wraps the JSON
       cleaned =
         raw
         |> String.replace(~r/```json\s*/i, "")
@@ -89,8 +88,6 @@ defmodule HermesBeam.Workflows.SyntheticDataReactor do
       end
     end
 
-    # If the LLM returns unparseable JSON, compensate by logging and skipping
-    # rather than crashing the whole Reactor graph.
     compensate fn _reason, _inputs, _ctx ->
       Logger.warning("[SyntheticDataReactor] Scenario parse failed — skipping batch")
       :ok
@@ -102,8 +99,8 @@ defmodule HermesBeam.Workflows.SyntheticDataReactor do
   # ---------------------------------------------------------------------------
   step :store_scenarios do
     argument :scenarios, result(:parse_scenarios)
-    argument :concept, input(:concept_to_explore)
-    argument :agent_id, input(:agent_id)
+    argument :concept,   input(:concept_to_explore)
+    argument :agent_id,  input(:agent_id)
 
     run fn %{scenarios: scenarios, concept: concept, agent_id: agent_id}, _ctx ->
       results =
@@ -111,10 +108,10 @@ defmodule HermesBeam.Workflows.SyntheticDataReactor do
           content = "[Synthetic | #{concept}] #{scenario}"
 
           HermesBeam.Memory.Episodic
-          |> Ash.ActionInput.for_create(:store, %{
+          |> Ash.Changeset.for_create(:store, %{
             agent_id: agent_id,
-            content: content,
-            type: :synthetic
+            content:  content,
+            type:     :synthetic
           })
           |> Ash.create()
         end)
