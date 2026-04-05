@@ -1,3 +1,3 @@
-# Seeds file — runs after ecto.setup.
-# Add any initial data fixtures here.
-IO.puts("[Seeds] No seeds to run. Ready.")
+# Seeds for Hermes BEAM.
+# Add Ash create/update calls here for any data that should
+# exist before the application starts (e.g., default agent scratchpad).

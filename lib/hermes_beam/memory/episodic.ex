@@ -3,14 +3,26 @@ defmodule HermesBeam.Memory.Episodic do
   Episodic (long-term) memory for the agent, stored as high-dimensional
   vector embeddings in Postgres via pgvector.
 
-  Unlike the `Scratchpad` which is explicitly bounded and curated by the
-  LLM, episodic memory grows over time and is queried semantically:
-  the system embeds the current user prompt and retrieves the top-K most
-  similar past interactions, injecting them into the LLM's context window.
+  Unlike the `Scratchpad` which is explicitly bounded and curated by the LLM,
+  episodic memory grows over time and is queried semantically: the system
+  embeds the current user prompt and retrieves the top-K most similar past
+  interactions, injecting them into the LLM's context window.
 
-  Embeddings are generated automatically by Ash AI using the configured
-  embedding model (default: OpenAI text-embedding-3-large, 3072 dimensions;
-  swap for a local Bumblebee embedding model to stay fully air-gapped).
+  ## Local-first embedding
+
+  The embedding model is resolved from the `HERMES_EMBEDDING_MODEL` environment
+  variable (default: `"local/bge-small-en-v1.5"`). This keeps the project
+  aligned with its sovereign, air-gapped design — no call is ever made to
+  `api.openai.com`. For best quality on Mac Mini Pro / Gaming PC hardware,
+  set this to `"nomic-ai/nomic-embed-text-v1.5"` (768-dim, adjust the
+  `dimensions` constraint and IVFFlat `lists` accordingly).
+
+  ## IVFFlat performance note
+
+  The IVFFlat approximate nearest-neighbour index becomes effective only after
+  approximately `lists * 39 = 3,900` rows exist in `agent_memories`. Below that
+  threshold Postgres falls back to a sequential scan — this is correct behaviour
+  and will not cause errors, only slightly slower recall in early operation.
   """
   use Ash.Resource,
     domain: HermesBeam.Domain,
@@ -22,7 +34,6 @@ defmodule HermesBeam.Memory.Episodic do
     repo HermesBeam.Repo
 
     custom_indexes do
-      # IVFFlat approximate nearest-neighbour index for fast vector recall.
       index [:content_vector],
         name: "agent_memories_vector_idx",
         using: "ivfflat",
@@ -34,7 +45,10 @@ defmodule HermesBeam.Memory.Episodic do
     embeddings do
       embed :content_vector do
         source :content
-        model "text-embedding-3-large"
+        # Resolved at runtime from env to keep embedding provider swappable.
+        # Default: local BGE-small (384-dim). Change dimensions below if you
+        # switch to a larger model such as nomic-embed (768-dim).
+        model System.get_env("HERMES_EMBEDDING_MODEL", "local/bge-small-en-v1.5")
       end
     end
   end
@@ -48,8 +62,8 @@ defmodule HermesBeam.Memory.Episodic do
 
     read :recall_similar do
       @doc """
-      Returns the top-K episodic memories most semantically similar to
-      the given query string, using pgvector cosine similarity.
+      Returns the top-5 episodic memories most semantically similar to the
+      given query string, using pgvector cosine similarity.
       """
       argument :query, :string, allow_nil?: false
 
@@ -65,7 +79,6 @@ defmodule HermesBeam.Memory.Episodic do
     uuid_primary_key :id
 
     attribute :agent_id, :uuid, allow_nil?: false
-
     attribute :content, :string, allow_nil?: false
 
     attribute :type, :atom,

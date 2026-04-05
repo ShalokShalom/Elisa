@@ -1,23 +1,16 @@
 defmodule HermesBeam.Domain do
   @moduledoc """
-  The central Ash Domain for Hermes BEAM.
+  Central Ash Domain for Hermes BEAM.
 
-  All Ash Resources in the application are registered here. Ash uses this
-  domain to resolve relationships, run policy checks, and co-ordinate actions
-  across resources.
+  Every Ash Resource must be registered here so resources can be queried,
+  mutated, and exposed to Ash AI tools and the Livebook dashboard.
   """
-  use Ash.Domain,
-    extensions: [AshAi.Domain]
+  use Ash.Domain
 
   resources do
-    # Memory
     resource HermesBeam.Memory.Scratchpad
     resource HermesBeam.Memory.Episodic
-
-    # Skills
     resource HermesBeam.Skill
-
-    # Observability
     resource HermesBeam.WorkflowLog
   end
 end

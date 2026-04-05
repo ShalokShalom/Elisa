@@ -4,8 +4,8 @@ defmodule HermesBeam.Application do
 
   The supervision tree is shaped by two environment variables:
 
-  - `NODE_TYPE` ("hub" | "worker") — determines whether the Phoenix dashboard
-    and cluster coordinator processes are started.
+  - `NODE_TYPE` ("hub" | "worker") — determines whether the observability
+    processes and scheduler are started.
   - `NODE_ROLE` ("gaming_gpu" | "mac_mini_pro" | "mac_mini_base") — determines
     which Bumblebee models are loaded into VRAM / Unified Memory.
   """
@@ -20,10 +20,13 @@ defmodule HermesBeam.Application do
 
     Logger.info("[HermesBeam] Booting as #{node_type} / #{node_role}")
 
+    attach_telemetry_once()
+
     children =
       base_children() ++
         cluster_children() ++
         ml_children() ++
+        hub_children(node_type) ++
         dashboard_children(node_type)
 
     opts = [strategy: :one_for_one, name: HermesBeam.Supervisor]
@@ -34,7 +37,6 @@ defmodule HermesBeam.Application do
   # Child groups
   # ---------------------------------------------------------------------------
 
-  # Every node — Hub and Workers alike — starts the Repo, PubSub, and Ash.
   defp base_children do
     [
       HermesBeam.Repo,
@@ -43,35 +45,53 @@ defmodule HermesBeam.Application do
     ]
   end
 
-  # Cluster discovery via libcluster_postgres.
   defp cluster_children do
     topologies = Application.get_env(:hermes_beam, :libcluster)[:topologies]
-
-    [
-      {Cluster.Supervisor, [topologies, [name: HermesBeam.ClusterSupervisor]]}
-    ]
+    [{Cluster.Supervisor, [topologies, [name: HermesBeam.ClusterSupervisor]]}]
   end
 
-  # Model serving — only loads the tiers appropriate for this machine's hardware.
   defp ml_children do
     [HermesBeam.LLM.TierSupervisor]
   end
 
-  # Phoenix LiveView dashboard — Hub nodes only.
-  defp dashboard_children("hub") do
-    Logger.info("[HermesBeam] Hub mode: starting Phoenix LiveView dashboard")
-
-    [
-      HermesBeamWeb.Telemetry,
-      HermesBeamWeb.Endpoint
-    ]
+  # Hub-only: IdleScheduler for synthetic data generation.
+  defp hub_children("hub") do
+    Logger.info("[HermesBeam] Hub mode: starting IdleScheduler")
+    [HermesBeam.IdleScheduler]
   end
 
-  defp dashboard_children(_worker), do: []
+  defp hub_children(_), do: []
+
+  # Hub-only: Phoenix LiveView dashboard.
+  # Guards against modules not yet compiled (e.g. during early dev).
+  defp dashboard_children("hub") do
+    Logger.info("[HermesBeam] Hub mode: starting Phoenix dashboard")
+
+    [HermesBeamWeb.Telemetry, HermesBeamWeb.Endpoint]
+    |> Enum.filter(&Code.ensure_loaded?/1)
+  end
+
+  defp dashboard_children(_), do: []
+
+  # ---------------------------------------------------------------------------
+  # Telemetry
+  # ---------------------------------------------------------------------------
+
+  # Attaches the WorkflowHandler telemetry on every node so Worker-originated
+  # Reactor events are also captured. The attachment is idempotent — calling
+  # it twice raises ArgumentError, which we swallow.
+  defp attach_telemetry_once do
+    HermesBeam.Telemetry.WorkflowHandler.attach()
+  rescue
+    ArgumentError -> :ok
+  end
 
   @impl true
   def config_change(changed, _new, removed) do
-    HermesBeamWeb.Endpoint.config_change(changed, removed)
+    if Code.ensure_loaded?(HermesBeamWeb.Endpoint) do
+      HermesBeamWeb.Endpoint.config_change(changed, removed)
+    end
+
     :ok
   end
 end
