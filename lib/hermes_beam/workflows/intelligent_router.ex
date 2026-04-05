@@ -1,11 +1,10 @@
 defmodule HermesBeam.Workflows.IntelligentRouter do
   @moduledoc """
-  Maps agent task types to the appropriate `Nx.Serving` hardware tier, then
-  dispatches the prompt for inference.
+  Maps agent task types to the appropriate `Nx.Serving` hardware tier.
 
-  The tier resolution is purely a function call (`tier_for/1`) so it can also
-  be called directly by `AgentLoop` without going through the full Reactor
-  graph on every simple inference.
+  This is intentionally a plain module — not a Reactor — because `tier_for/1`
+  is a pure function called on the hot path inside `AgentLoop`. Wrapping it in
+  a Reactor graph would add unnecessary overhead with no benefit.
 
   Task → Tier mapping:
 
@@ -19,26 +18,6 @@ defmodule HermesBeam.Workflows.IntelligentRouter do
   | :format_json        | :tier_3_docs         | Phi-3 Mini     |
   | _default_           | :tier_2_general      | Llama 3 8B     |
   """
-  use Reactor
-  require Logger
-
-  input :agent_prompt
-  input :task_type
-
-  step :route_and_infer do
-    argument :prompt, input(:agent_prompt)
-    argument :task_type, input(:task_type)
-
-    run fn %{prompt: prompt, task_type: task_type}, _ctx ->
-      tier = tier_for(task_type)
-      Logger.debug("[Router] #{task_type} → #{tier}")
-      HermesBeam.LLM.ModelWorker.generate(tier, prompt)
-    end
-  end
-
-  # ---------------------------------------------------------------------------
-  # Public helper — can be called without running the full Reactor graph
-  # ---------------------------------------------------------------------------
 
   @spec tier_for(atom()) :: atom()
   def tier_for(task_type) do

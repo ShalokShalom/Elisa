@@ -3,26 +3,29 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
   Telemetry handler that attaches to Reactor step events and writes
   structured entries to `WorkflowLog`.
 
-  Attach this handler once at application startup via
-  `HermesBeam.Telemetry.WorkflowHandler.attach/0`.
+  Attached on every node (Hub and Workers) via `HermesBeam.Application`
+  so that Worker-originated Reactor events are also captured.
 
-  Reactor emits these events (as of reactor ~> 0.9):
+  The ETS table `@table` is local to each node and maps
+  `reactor_id -> WorkflowLog.id`. Since all Reactor events for a given run
+  fire on the same node that called `Reactor.run/3`, this is safe: an event
+  emitted on a Worker will look up the ETS entry that was inserted on the
+  same Worker, then write to the shared Hub Postgres via Ecto over Tailscale.
+
+  Reactor emits these events (reactor ~> 0.9):
     [:reactor, :run, :start]
     [:reactor, :run, :stop]
     [:reactor, :step, :run, :start]
     [:reactor, :step, :run, :stop]
-
-  The `metadata` map for step events includes:
-    %{reactor_id: id, step_name: atom, input: map}
   """
   require Logger
 
-  # In-memory ETS table to map reactor_id -> WorkflowLog.id
-  # so step events can update the correct log row without a DB lookup.
   @table :workflow_log_index
 
   def attach do
-    :ets.new(@table, [:named_table, :public, :set])
+    unless :ets.whereis(@table) != :undefined do
+      :ets.new(@table, [:named_table, :public, :set])
+    end
 
     :telemetry.attach_many(
       "hermes-beam-workflow-handler",
@@ -39,16 +42,16 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
 
   def handle_event([:reactor, :run, :start], _measurements, metadata, _config) do
     workflow_name = inspect(metadata[:reactor])
-    input_snapshot = metadata[:inputs] || %{}
 
     case HermesBeam.WorkflowLog
          |> Ash.ActionInput.for_create(:create, %{
            workflow_name: workflow_name,
-           input_snapshot: input_snapshot
+           input_snapshot: metadata[:inputs] || %{}
          })
          |> Ash.create() do
       {:ok, log} ->
         :ets.insert(@table, {metadata[:id], log.id})
+
       {:error, reason} ->
         Logger.warning("[WorkflowHandler] Failed to create log: #{inspect(reason)}")
     end
@@ -57,23 +60,19 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
   def handle_event([:reactor, :run, :stop], measurements, metadata, _config) do
     case :ets.lookup(@table, metadata[:id]) do
       [{_reactor_id, log_id}] ->
-        action = if measurements[:error], do: :fail, else: :complete
-        error_reason = if measurements[:error], do: inspect(measurements[:error]), else: nil
+        with {:ok, log} <- Ash.get(HermesBeam.WorkflowLog, log_id) do
+          action = if measurements[:error], do: :fail, else: :complete
+          attrs  = if measurements[:error], do: %{error_reason: inspect(measurements[:error])}, else: %{}
 
-        case Ash.get(HermesBeam.WorkflowLog, log_id) do
-          {:ok, log} ->
-            attrs = if error_reason, do: %{error_reason: error_reason}, else: %{}
-
-            log
-            |> Ash.ActionInput.for_update(action, attrs)
-            |> Ash.update()
-
-          _ -> :ok
+          log
+          |> Ash.ActionInput.for_update(action, attrs)
+          |> Ash.update()
         end
 
         :ets.delete(@table, metadata[:id])
 
-      [] -> :ok
+      [] ->
+        :ok
     end
   end
 
@@ -85,11 +84,9 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
   end
 
   def handle_event([:reactor, :step, :run, :stop], measurements, metadata, _config) do
-    status = if measurements[:error], do: :failed, else: :ok
-
     update_step(metadata[:id], metadata[:step_name], %{
       finished_at: DateTime.utc_now(),
-      status: status
+      status: if(measurements[:error], do: :failed, else: :ok)
     })
   end
 
@@ -100,18 +97,16 @@ defmodule HermesBeam.Telemetry.WorkflowHandler do
   defp update_step(reactor_id, step_name, attrs) do
     case :ets.lookup(@table, reactor_id) do
       [{_reactor_id, log_id}] ->
-        case Ash.get(HermesBeam.WorkflowLog, log_id) do
-          {:ok, log} ->
-            updated_steps = Map.put(log.steps || %{}, to_string(step_name), attrs)
+        with {:ok, log} <- Ash.get(HermesBeam.WorkflowLog, log_id) do
+          updated_steps = Map.put(log.steps || %{}, to_string(step_name), attrs)
 
-            log
-            |> Ash.ActionInput.for_update(:update_step, %{steps: updated_steps})
-            |> Ash.update()
-
-          _ -> :ok
+          log
+          |> Ash.ActionInput.for_update(:update_step, %{steps: updated_steps})
+          |> Ash.update()
         end
 
-      [] -> :ok
+      [] ->
+        :ok
     end
   end
 end
