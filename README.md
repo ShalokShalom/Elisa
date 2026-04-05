@@ -1,6 +1,6 @@
-# Hermes BEAM
+# Elisa
 
-> A distributed, self-improving AI Agent framework built on Ash AI, Reactor, Nx/Bumblebee, and Tailscale — the BEAM takes on Hermes.
+> A distributed, self-improving AI Agent framework built on Ash AI, Reactor, Nx/Bumblebee, and Tailscale — the BEAM takes on [Hermes](https://hermes-agent.nousresearch.com/). 
 
 ---
 
@@ -10,7 +10,7 @@
 | :--- | :--- |
 | **Relevance** | All design decisions directly serve one goal: a sovereign, self-improving AI agent that owns its own memory, skills, and compute. Every dependency has a concrete, non-replaceable role. |
 | **Authority** | Built on mature, production-grade Elixir libraries: Ash Framework (Zach Daniel / Alembic), Reactor, Nx/Bumblebee (José Valim / Elixir-Nx org), libcluster/libcluster_postgres (Supabase). |
-| **Date** | Actively developed. Phases 0–3 implemented April 2026. Livebook observability layer added April 2026. All dependency versions current as of Q2 2026. |
+| **Date** | Actively developed. Phases 0–3 implemented April 2026. Livebook observability layer added in April 2026. All dependency versions are current as of Q2 2026. |
 | **Appearance** | Source is fully documented with `@moduledoc`, tests co-located with implementation, every architectural decision traceable to a ROADMAP phase with explicit Exit Criteria. |
 | **Reason for Writing** | To build — not just describe — a fully working distributed AI agent system. All documentation drives implementation. |
 
